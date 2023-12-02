@@ -16,27 +16,30 @@ import android.util.Log;
 public class AvcEncoder implements Runnable {
     private final static String TAG = "MediaCodec";
     private static final boolean VERBOSE = false;
-    private final int TIMEOUT_USEC = 12000;
 
-    private MediaCodec mEncoder;
-    private MediaMuxer mMuxer;
-    private boolean mMuxerStarted;
-    private int mTrackIndex;
-    private MediaCodec.BufferInfo mBufferInfo;
-
-    private static final int FRAME_RATE      = 24; // 24 FPS
-    private static final int IFRAME_INTERVAL = 2;  // 2 seconds between I-frames
-//  private static final int NUM_FRAMES = 30;      // two seconds of video
+    private static final int FRAME_RATE        = 24; // 24 FPS
+    private static final int IFRAME_INTERVAL   = 2;  // 2 seconds between I-frames
+    private static final int AUTO_STOP_SECONDS = 15;
 
     private int mWidth   = -1;
     private int mHeight  = -1;
     private int mBitRate = -1;
 
-    public byte[] mConfigData;
+    private byte[]     mInputData = null;
+    public  byte[]     mConfigData;
+    private MediaCodec mEncoder;
+    private MediaMuxer mMuxer;
+    private boolean    mMuxerStarted;
+    private int        mTrackIndex;
+    private MediaCodec.BufferInfo mBufferInfo;
+
+    private boolean      mThreadRunning  = false;
+    private long         mGeneratedIndex = 0;
+    private ByteBuffer[] mInputBuffers;
+    private ByteBuffer[] mOutputBuffers;
 
     private static final String OUTPUT_PATH = Environment.getExternalStorageDirectory().getAbsolutePath()
                                             + "/DCIM/cc/t2.mp4";
-    //private BufferedOutputStream mOutputStream = null;
 
     public AvcEncoder(int width, int height) {
         mWidth   = width;
@@ -50,38 +53,7 @@ public class AvcEncoder implements Runnable {
             Log.e(TAG, ">> prepareEncoder() failed:");
             e.printStackTrace();
         }
-
-        /*
-        mBufferInfo = new MediaCodec.BufferInfo();
-
-        MediaFormat mediaFormat = MediaFormat.createVideoFormat("video/avc", mWidth, mHeight);
-        mediaFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar);
-        mediaFormat.setInteger(MediaFormat.KEY_BIT_RATE, mWidth * mHeight * 4);
-        mediaFormat.setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE);
-        mediaFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);
-
-        try {
-            mEncoder = MediaCodec.createEncoderByType("video/avc");
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    
-        mEncoder.configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        mEncoder.start();
-        createOutFile();
-        */
     }
-
-    /*
-    private void createOutFile(){
-        File file = new File(OUTPUT_PATH);
-        try {
-            mOutputStream = new BufferedOutputStream(new FileOutputStream(file));
-        } catch (Exception e){ 
-            e.printStackTrace();
-        }
-    }
-    */
 
     private void prepareEncoder() throws Exception {
         mBufferInfo = new MediaCodec.BufferInfo();
@@ -98,7 +70,6 @@ public class AvcEncoder implements Runnable {
 
         mEncoder = MediaCodec.createEncoderByType("video/avc");
         mEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        // mInputSurface = new CodecInputSurface(mEncoder.createInputSurface());
         mEncoder.start();
 
         try {
@@ -109,25 +80,6 @@ public class AvcEncoder implements Runnable {
 
         mTrackIndex = -1;
         mMuxerStarted = false;
-    }
-
-    private boolean mThreadRunning = false;
-    private byte[] mInputData = null;
-    private long mGeneratedIndex = 0;
-    private ByteBuffer[] mInputBuffers;
-    private ByteBuffer[] mOutputBuffers;
-
-    private void releaseEncoder() {
-        if (mEncoder != null) {
-            mEncoder.stop();
-            mEncoder.release();
-            mEncoder = null;
-        }
-        if (mMuxer != null) {
-            mMuxer.stop();
-            mMuxer.release();
-            mMuxer = null;
-        }
     }
 
     public void startThread() {
@@ -147,7 +99,8 @@ public class AvcEncoder implements Runnable {
         long start = System.currentTimeMillis();
 
         while (mThreadRunning) {
-            int ret = doFrame();
+            int ret = doFrame(); // queueInputBuffer
+
             if (ret < 0) {
                 mThreadRunning = false;
                 Log.w(TAG, "doFrame() failed: " + ret);
@@ -155,31 +108,21 @@ public class AvcEncoder implements Runnable {
             }
 
             long now = System.currentTimeMillis();
-            if (now - start > 1000 * 8) {
+            if (now - start > AUTO_STOP_SECONDS * 1000) { // N 秒自动停止
                 mThreadRunning = false;
+                Log.w(TAG, ">> Auto stopped at " + AUTO_STOP_SECONDS + " seconds.");
             }
         }
 
-        int inputBufferIndex = mEncoder.dequeueInputBuffer(-1);
-        if (inputBufferIndex >= 0) {
-            ByteBuffer inputBuffer = mInputBuffers[inputBufferIndex];
-            inputBuffer.clear();
-            mEncoder.queueInputBuffer(inputBufferIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+        try {
+            drainEncoder(true);
         }
-
-        drainEncoder(true);
+        catch (Exception e) {
+            Log.w(TAG, ">> drainEncoder(true) failed: " + e.toString());
+        }
 
         releaseEncoder();
-        Log.w(TAG, ">> releaseEncoder()");
-
-        /*
-        try {
-            mOutputStream.flush();
-            mOutputStream.close();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        */
+        Log.d(TAG, ">> releaseEncoder()");
     }
 
     int doFrame() {
@@ -189,9 +132,10 @@ public class AvcEncoder implements Runnable {
             NV21ToNV12(mInputData, yuv420sp, mWidth, mHeight);
             mInputData = yuv420sp;
         }
+
         if (mInputData == null) {
             try {
-                Thread.sleep(500);
+                Thread.sleep(50);
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
@@ -199,7 +143,6 @@ public class AvcEncoder implements Runnable {
         }
 
         try {
-            //long startMs = System.currentTimeMillis();
             long pts = 0;
             int inputBufferIndex = mEncoder.dequeueInputBuffer(-1);
             if (inputBufferIndex >= 0) {
@@ -212,40 +155,13 @@ public class AvcEncoder implements Runnable {
             }
 
             drainEncoder(false);
-
-            /*
-            //MediaCodec.BufferInfo mBufferInfo = new MediaCodec.BufferInfo();
-            int outputBufferIndex = mEncoder.dequeueOutputBuffer(mBufferInfo, TIMEOUT_USEC);
-            while (outputBufferIndex >= 0) {
-                // Log.i("AvcEncoder", "Get H264 Buffer Success! flag = " + mBufferInfo.flags +
-                //       ",pts = " + mBufferInfo.presentationTimeUs);
-                ByteBuffer outputBuffer = mOutputBuffers[outputBufferIndex];
-                byte[] outData = new byte[mBufferInfo.size];
-                outputBuffer.get(outData);
-                Log.i(TAG, "MediaCodec.BufferInfo.flags: " + mBufferInfo.flags);
-                if (mBufferInfo.flags == 2) {
-                    mConfigData = outData;
-                } else if (mBufferInfo.flags == 1) {
-                    byte[] keyframe = new byte[mBufferInfo.size + mConfigData.length];
-                    System.arraycopy(mConfigData, 0, keyframe, 0, mConfigData.length);
-                    System.arraycopy(outData, 0, keyframe, mConfigData.length, outData.length);
-
-                    mOutputStream.write(keyframe, 0, keyframe.length);
-                } else {
-                    mOutputStream.write(outData, 0, outData.length);
-                }
-
-                mEncoder.releaseOutputBuffer(outputBufferIndex, false);
-                outputBufferIndex = mEncoder.dequeueOutputBuffer(mBufferInfo, TIMEOUT_USEC);
-            }
-            */
-        } catch (Throwable t) {
-            Log.e(TAG, "Exception in EncoderThread:");
+            return 0;
+        }
+        catch (Throwable t) {
+            Log.e(TAG, "drainEncoder(false) failed:");
             t.printStackTrace();
             return -1;
         }
-
-        return 0;
     }
 
     /**
@@ -254,13 +170,19 @@ public class AvcEncoder implements Runnable {
      * is set, we send EOS to the encoder, and then iterate until we see EOS on the output.
      * Calling this with endOfStream set should be done once, right before stopping the muxer.
      */
-    private void drainEncoder(boolean endOfStream) {
+    private void drainEncoder(boolean endOfStream) throws Exception {
         final int TIMEOUT_USEC = 10000;
         if (VERBOSE) Log.d(TAG, "drainEncoder(" + endOfStream + ")");
 
         if (endOfStream) {
             if (VERBOSE) Log.d(TAG, "sending EOS to encoder");
-            //mEncoder.signalEndOfInputStream();
+
+            int inputBufferIndex = mEncoder.dequeueInputBuffer(-1);
+            if (inputBufferIndex >= 0) {
+                ByteBuffer inputBuffer = mInputBuffers[inputBufferIndex];
+                inputBuffer.clear();
+                mEncoder.queueInputBuffer(inputBufferIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+            }
         }
 
         ByteBuffer[] encoderOutputBuffers = mEncoder.getOutputBuffers();
@@ -333,6 +255,19 @@ public class AvcEncoder implements Runnable {
         }
     }
 
+    private void releaseEncoder() {
+        if (mEncoder != null) {
+            mEncoder.stop();
+            mEncoder.release();
+            mEncoder = null;
+        }
+        if (mMuxer != null) {
+            mMuxer.stop();
+            mMuxer.release();
+            mMuxer = null;
+        }
+    }
+
     private void NV21ToNV12(byte[] nv21, byte[] nv12, int width, int height) {
         if (nv21 == null || nv12 == null) {
             return;
@@ -351,10 +286,8 @@ public class AvcEncoder implements Runnable {
         }
     }
 
-    /**
-     * Generates the presentation time for frame N, in microseconds.
-     */
+    /* Generates the presentation time for frame N, in microseconds. */
     private long computePresentationTime(long frameIndex) {
-        return 132 + frameIndex * 1000000 / FRAME_RATE;
+        return 132 + frameIndex * 1000000 / FRAME_RATE; // 132: magic number ?
     }
 }

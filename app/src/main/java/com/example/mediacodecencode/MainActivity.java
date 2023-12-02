@@ -21,8 +21,7 @@ import android.support.v4.content.ContextCompat;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 
-public class MainActivity extends Activity implements SurfaceHolder.Callback, PreviewCallback{
-
+public class MainActivity extends Activity implements SurfaceHolder.Callback, PreviewCallback {
     private SurfaceView   mSurfaceView;
     private SurfaceHolder mSurfaceHolder;
     private Camera        mCamera;
@@ -34,22 +33,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Pr
     private final static int YUV_QUEUE_SIZE = 10;
     private final static int CAMERA_GRANTED = 10001;
 
-	public static ArrayBlockingQueue<byte[]> YUVQueue = new ArrayBlockingQueue<byte[]>(YUV_QUEUE_SIZE); 
+    public static ArrayBlockingQueue<byte[]> YUVQueue = new ArrayBlockingQueue<byte[]>(YUV_QUEUE_SIZE);
 
-	private AvcEncoder mAvcEncoder;
+    private AvcEncoder mAvcEncoder;
 
     private static String[] PERMISSIONS_STORAGE = {
             "android.permission.CAMERA",
             "android.permission.WRITE_EXTERNAL_STORAGE"
     };
 
-	@Override
-	protected void onCreate(Bundle savedInstanceState) {
-		super.onCreate(savedInstanceState);
-		setContentView(R.layout.activity_main);
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
         mSurfaceView = findViewById(R.id.mSurfaceView);
         SupportAvcCodec();
-        if (Build.VERSION.SDK_INT>22) {
+        if (Build.VERSION.SDK_INT > 22) {
             if (!checkPermissionAllGranted(PERMISSIONS_STORAGE)) {
                 ActivityCompat.requestPermissions(MainActivity.this, PERMISSIONS_STORAGE, CAMERA_GRANTED);
             } else {
@@ -58,9 +57,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Pr
         } else {
             init();
         }
-	}
+    }
 
-	private void init() {
+    private void init() {
         mSurfaceHolder = mSurfaceView.getHolder();
         mSurfaceHolder.addCallback(this);
     }
@@ -119,29 +118,28 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Pr
 
     void stopAll() {
         if (null != mCamera) {
-        	mCamera.setPreviewCallback(null);
-        	mCamera.stopPreview();
+            mCamera.setPreviewCallback(null);
+            mCamera.stopPreview();
             mCamera.release();
             mCamera = null;
             mAvcEncoder.stopThread();
         }
     }
 
-	@Override
-	public void onPreviewFrame(byte[] data, android.hardware.Camera mCamera) {
-		// TODO Auto-generated method stub
-		putYUVData(data, data.length);
-	}
+    @Override
+    public void onPreviewFrame(byte[] data, android.hardware.Camera mCamera) {
+        putYUVData(data, data.length);
+    }
 
-	public void putYUVData(byte[] buffer, int length) {
-		if (YUVQueue.size() >= 10) {
-			YUVQueue.poll();
-		}
-		YUVQueue.add(buffer);
-	}
+    public void putYUVData(byte[] buffer, int length) {
+        if (YUVQueue.size() >= 10) {
+            YUVQueue.poll();
+        }
+        YUVQueue.add(buffer);
+    }
 
-	@SuppressLint("NewApi")
-	private void SupportAvcCodec() {
+    @SuppressLint("NewApi")
+    private void SupportAvcCodec() {
         for (int j = MediaCodecList.getCodecCount() - 1; j >= 0; j--) {
             MediaCodecInfo codecInfo = MediaCodecList.getCodecInfoAt(j);
 
@@ -177,7 +175,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Pr
     }
 
     @SuppressWarnings("deprecation")
-	private Camera getBackCamera() {
+    private Camera getBackCamera() {
         Camera c = null;
         try {
             c = Camera.open(0); // attempt to get a Camera instance
