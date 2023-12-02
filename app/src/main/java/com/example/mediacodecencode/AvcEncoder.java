@@ -1,11 +1,7 @@
 package com.example.mediacodecencode;
 
-import java.io.BufferedOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import android.annotation.SuppressLint;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
@@ -25,8 +21,7 @@ public class AvcEncoder implements Runnable {
     private int mHeight  = -1;
     private int mBitRate = -1;
 
-    private byte[]     mInputData = null;
-    public  byte[]     mConfigData;
+    private byte[]     mInputYuvData = null;
     private MediaCodec mEncoder;
     private MediaMuxer mMuxer;
     private boolean    mMuxerStarted;
@@ -34,9 +29,8 @@ public class AvcEncoder implements Runnable {
     private MediaCodec.BufferInfo mBufferInfo;
 
     private boolean      mThreadRunning  = false;
-    private long         mGeneratedIndex = 0;
+    private long         mFrameIndex = 0;
     private ByteBuffer[] mInputBuffers;
-    private ByteBuffer[] mOutputBuffers;
 
     private static final String OUTPUT_PATH = Environment.getExternalStorageDirectory().getAbsolutePath()
                                             + "/DCIM/cc/t2.mp4";
@@ -58,10 +52,8 @@ public class AvcEncoder implements Runnable {
     private void prepareEncoder() throws Exception {
         mBufferInfo = new MediaCodec.BufferInfo();
 
+        // Set some props. Failing to specify some of these can cause MediaCodec configure() throw unhelpful exception
         MediaFormat format = MediaFormat.createVideoFormat("video/avc", mWidth, mHeight);
-
-        // Set some properties.  Failing to specify some of these can cause the MediaCodec
-        // configure() call to throw an unhelpful exception.
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar);
         format.setInteger(MediaFormat.KEY_BIT_RATE, mBitRate);
         format.setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE);
@@ -72,11 +64,7 @@ public class AvcEncoder implements Runnable {
         mEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
         mEncoder.start();
 
-        try {
-            mMuxer = new MediaMuxer(OUTPUT_PATH, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-        } catch (IOException ioe) {
-            throw new RuntimeException("MediaMuxer creation failed", ioe);
-        }
+        mMuxer = new MediaMuxer(OUTPUT_PATH, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
 
         mTrackIndex = -1;
         mMuxerStarted = false;
@@ -95,7 +83,6 @@ public class AvcEncoder implements Runnable {
     public void run() {
         mThreadRunning = true;
         mInputBuffers  = mEncoder.getInputBuffers();
-        mOutputBuffers = mEncoder.getOutputBuffers();
         long start = System.currentTimeMillis();
 
         while (mThreadRunning) {
@@ -126,14 +113,14 @@ public class AvcEncoder implements Runnable {
     }
 
     int doFrame() {
-        if (MainActivity.YUVQueue.size() > 0) {
-            mInputData = MainActivity.YUVQueue.poll();
-            byte[] yuv420sp = new byte[mWidth * mHeight * 3 / 2];
-            NV21ToNV12(mInputData, yuv420sp, mWidth, mHeight);
-            mInputData = yuv420sp;
+        if (MainActivity.sYUVQueue.size() > 0) {
+            byte[] cameraYUVData = MainActivity.sYUVQueue.poll();
+            if (mInputYuvData == null)
+                mInputYuvData = new byte[mWidth * mHeight * 3 / 2];
+            NV21_to_NV12(cameraYUVData, mInputYuvData, mWidth, mHeight);
         }
 
-        if (mInputData == null) {
+        if (mInputYuvData == null) {
             try {
                 Thread.sleep(50);
             } catch (InterruptedException e) {
@@ -143,15 +130,14 @@ public class AvcEncoder implements Runnable {
         }
 
         try {
-            long pts = 0;
             int inputBufferIndex = mEncoder.dequeueInputBuffer(-1);
             if (inputBufferIndex >= 0) {
-                pts = computePresentationTime(mGeneratedIndex);
+                long pts = 132 + mFrameIndex * 1000000 / FRAME_RATE; // 132: magic number ?
                 ByteBuffer inputBuffer = mInputBuffers[inputBufferIndex];
                 inputBuffer.clear();
-                inputBuffer.put(mInputData);
-                mEncoder.queueInputBuffer(inputBufferIndex, 0, mInputData.length, pts, 0);
-                mGeneratedIndex += 1;
+                inputBuffer.put(mInputYuvData);
+                mEncoder.queueInputBuffer(inputBufferIndex, 0, mInputYuvData.length, pts, 0);
+                mFrameIndex += 1;
             }
 
             drainEncoder(false);
@@ -171,9 +157,6 @@ public class AvcEncoder implements Runnable {
      * Calling this with endOfStream set should be done once, right before stopping the muxer.
      */
     private void drainEncoder(boolean endOfStream) throws Exception {
-        final int TIMEOUT_USEC = 10000;
-        if (VERBOSE) Log.d(TAG, "drainEncoder(" + endOfStream + ")");
-
         if (endOfStream) {
             if (VERBOSE) Log.d(TAG, "sending EOS to encoder");
 
@@ -187,39 +170,33 @@ public class AvcEncoder implements Runnable {
 
         ByteBuffer[] encoderOutputBuffers = mEncoder.getOutputBuffers();
         while (true) {
-            int encoderStatus = mEncoder.dequeueOutputBuffer(mBufferInfo, TIMEOUT_USEC);
-            if (encoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                // no output available yet
-                if (!endOfStream) {
-                    break;      // out of while
-                } else {
-                    if (VERBOSE) Log.d(TAG, "no output available, spinning to await EOS");
-                }
-            } else if (encoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
-                // not expected for an encoder
+            int encoderStatus = mEncoder.dequeueOutputBuffer(mBufferInfo, 10000);
+            if (encoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) { // no output available yet
+                if (!endOfStream)
+                    break; // out of while
+                // else: no output available, spinning to await EOS
+            }
+            else if (encoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
+                // not expected for an encoder, should not happen
                 encoderOutputBuffers = mEncoder.getOutputBuffers();
-            } else if (encoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+            }
+            else if (encoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 // should happen before receiving buffers, and should only happen once
-                if (mMuxerStarted) {
-                    throw new RuntimeException("format changed twice");
-                }
-                MediaFormat newFormat = mEncoder.getOutputFormat();
-                Log.d(TAG, "encoder output format changed: " + newFormat);
+                if (mMuxerStarted)
+                    throw new RuntimeException("MediaCodec.output_format changed twice");
 
                 // now that we have the Magic Goodies, start the muxer
-                mTrackIndex = mMuxer.addTrack(newFormat);
+                mTrackIndex = mMuxer.addTrack( mEncoder.getOutputFormat() );
                 mMuxer.start();
                 mMuxerStarted = true;
-            } else if (encoderStatus < 0) {
-                Log.w(TAG, "unexpected result from encoder.dequeueOutputBuffer: " +
-                        encoderStatus);
-                // let's ignore it
-            } else {
+            }
+            else if (encoderStatus < 0) { // let's ignore it
+                Log.w(TAG, "mEncoder.dequeueOutputBuffer() returned bad status: " + encoderStatus);
+            }
+            else {
                 ByteBuffer encodedData = encoderOutputBuffers[encoderStatus];
-                if (encodedData == null) {
-                    throw new RuntimeException("encoderOutputBuffer " + encoderStatus +
-                            " was null");
-                }
+                if (encodedData == null)
+                    throw new RuntimeException("encoderOutputBuffer " + encoderStatus + " was null");
 
                 if ((mBufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
                     // The codec config data was pulled out and fed to the muxer when we got
@@ -229,9 +206,8 @@ public class AvcEncoder implements Runnable {
                 }
 
                 if (mBufferInfo.size != 0) {
-                    if (!mMuxerStarted) {
+                    if (!mMuxerStarted)
                         throw new RuntimeException("muxer hasn't started");
-                    }
 
                     // adjust the ByteBuffer values to match BufferInfo (not needed?)
                     encodedData.position(mBufferInfo.offset);
@@ -244,12 +220,11 @@ public class AvcEncoder implements Runnable {
                 mEncoder.releaseOutputBuffer(encoderStatus, false);
 
                 if ((mBufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                    if (!endOfStream) {
+                    if (!endOfStream)
                         Log.w(TAG, "reached end of stream unexpectedly");
-                    } else {
+                    else
                         if (VERBOSE) Log.d(TAG, "end of stream reached");
-                    }
-                    break;      // out of while
+                    break; // out of while
                 }
             }
         }
@@ -268,26 +243,17 @@ public class AvcEncoder implements Runnable {
         }
     }
 
-    private void NV21ToNV12(byte[] nv21, byte[] nv12, int width, int height) {
-        if (nv21 == null || nv12 == null) {
-            return;
+    private void NV21_to_NV12(byte[] src_nv21, byte[] dst_nv12, int width, int height) {
+        int frameSize = width * height;
+        //long t1 = System.nanoTime();
+        System.arraycopy(src_nv21, 0, dst_nv12, 0, frameSize);
+        for (int i = 0; i < frameSize / 2; i += 2) {
+            dst_nv12[frameSize + i - 1] = src_nv21[i + frameSize];
+            dst_nv12[frameSize + i]     = src_nv21[i + frameSize - 1];
         }
-        int framesize = width * height;
-        int i = 0, j = 0;
-        System.arraycopy(nv21, 0, nv12, 0, framesize);
-        for (i = 0; i < framesize; i++) {
-            nv12[i] = nv21[i];
-        }
-        for (j = 0; j < framesize / 2; j += 2) {
-            nv12[framesize + j - 1] = nv21[j + framesize];
-        }
-        for (j = 0; j < framesize / 2; j += 2) {
-            nv12[framesize + j] = nv21[j + framesize - 1];
-        }
+        //dt_sum += System.nanoTime() - t1;
+        //if (++cc % 100 == 0) // 640x480@24FPS 平均 2.0 ms, TODO: 改为 native 计算是否会有明显提升?
+        //    Log.i(TAG, "NV21_to_NV12 dt " + (dt_sum / cc));
     }
-
-    /* Generates the presentation time for frame N, in microseconds. */
-    private long computePresentationTime(long frameIndex) {
-        return 132 + frameIndex * 1000000 / FRAME_RATE; // 132: magic number ?
-    }
+    //private int cc = 0, dt_sum = 0;
 }

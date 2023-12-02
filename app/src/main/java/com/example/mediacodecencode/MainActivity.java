@@ -33,7 +33,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Pr
     private final static int YUV_QUEUE_SIZE = 10;
     private final static int CAMERA_GRANTED = 10001;
 
-    public static ArrayBlockingQueue<byte[]> YUVQueue = new ArrayBlockingQueue<byte[]>(YUV_QUEUE_SIZE);
+    public static ArrayBlockingQueue<byte[]> sYUVQueue = new ArrayBlockingQueue<byte[]>(YUV_QUEUE_SIZE);
 
     private AvcEncoder mAvcEncoder;
 
@@ -128,17 +128,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Pr
 
     @Override
     public void onPreviewFrame(byte[] data, android.hardware.Camera mCamera) {
-        putYUVData(data, data.length);
-    }
-
-    public void putYUVData(byte[] buffer, int length) {
-        if (YUVQueue.size() >= 10) {
-            YUVQueue.poll();
+        if (sYUVQueue.size() >= 10) {
+            sYUVQueue.poll();
         }
-        YUVQueue.add(buffer);
+        sYUVQueue.add(data);
     }
 
-    @SuppressLint("NewApi")
     private void SupportAvcCodec() {
         for (int j = MediaCodecList.getCodecCount() - 1; j >= 0; j--) {
             MediaCodecInfo codecInfo = MediaCodecList.getCodecInfoAt(j);
